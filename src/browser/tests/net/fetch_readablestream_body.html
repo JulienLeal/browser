@@ -88,3 +88,24 @@
     });
   }
 </script>
+
+<script id=fetch_readablestream_body_clone type=module>
+  {
+    const state = await testing.async();
+    // clone() drains a closed stream, so the clone can be sent right away
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode("cloned"));
+        c.close();
+      },
+    });
+    const request = new Request("http://127.0.0.1:9582/echo_body", { method: "POST", duplex: "half", body: stream });
+    const response = await fetch(request.clone());
+    const text = await response.text();
+
+    state.resolve();
+    await state.done(() => {
+      testing.expectEqual("cloned", text);
+    });
+  }
+</script>

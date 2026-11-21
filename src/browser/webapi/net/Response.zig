@@ -507,16 +507,23 @@ pub fn clone(self: *Response, exec: *const Execution) !*Response {
     const local = exec.js.local.?;
     try self.checkUnusable(local);
 
+    // the clone's half of a teed stream
+    var branch: ?*ReadableStream = null;
     switch (self._body) {
-        // No stream tee: a stream body is drained so each copy owns its bytes.
-        // Same as Request.clone().
-        .stream => |stream| {
+        // A stream still open is teed, as in the spec. A closed one is drained
+        // so each copy owns its bytes, as the Cache only stores a body it can
+        // read right away. Same as Request.clone().
+        .stream => |stream| if (stream._state == .closed) {
             const drained = stream.collectBodyBytes(self._arena.allocator(), .lenient) catch |err| switch (err) {
                 error.TypeError => return local.typeError("Failed to read ReadableStream body"),
                 else => return err,
             };
             try lockStream(stream, exec);
             self._body = .{ .bytes = drained };
+        } else {
+            const branches = try stream.tee(exec);
+            self._body = .{ .stream = branches[0] };
+            branch = branches[1];
         },
         .empty, .bytes, .errored => {},
     }
@@ -524,8 +531,7 @@ pub fn clone(self: *Response, exec: *const Execution) !*Response {
     const session = exec.session;
     const body_len = switch (self._body) {
         .bytes => |b| b.len,
-        .empty, .errored => 0,
-        .stream => unreachable,
+        .empty, .stream, .errored => 0,
     };
     const arena = try session.getPinnedArena(body_len + self._url.len + 256, "Response.clone");
     errdefer arena.release();
@@ -533,7 +539,7 @@ pub fn clone(self: *Response, exec: *const Execution) !*Response {
     const body: Body = switch (self._body) {
         .bytes => |b| .{ .bytes = try arena.dupe(u8, b) },
         .empty => .empty,
-        .stream => unreachable,
+        .stream => .{ .stream = branch.? },
         .errored => .errored,
     };
     const status_text = try arena.dupe(u8, self._status_text);

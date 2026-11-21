@@ -661,6 +661,50 @@
   });
 </script>
 
+<script id=stream_body_clone type=module>
+  const state = await testing.async();
+  const enc = new TextEncoder();
+  const outcome = (p) => p.then(() => 'resolved', () => 'rejected');
+
+  // an open stream is teed: every copy reads the chunks as they arrive
+  let controller;
+  const stream = new ReadableStream({ start(c) { controller = c; c.enqueue(enc.encode('a')); } });
+  const res = new Response(stream);
+  const body_before = res.body;
+  const copy = res.clone();
+  const copy_of_copy = copy.clone();
+  const body_replaced = res.body !== body_before;
+  const texts = Promise.all([res.text(), copy.text(), copy_of_copy.text()]);
+  await new Promise((r) => setTimeout(r, 0));
+  controller.enqueue(enc.encode('b'));
+  controller.close();
+
+  // cancelling the copy's body leaves the original readable
+  let controller2;
+  const res2 = new Response(new ReadableStream({ start(c) { controller2 = c; } }));
+  res2.clone().body.cancel();
+  const text2 = res2.text();
+  controller2.enqueue(enc.encode('k'));
+  controller2.close();
+
+  // an errored stream gives two errored copies
+  const errored = new Response(new ReadableStream({ start(c) { c.error(new Error('boom')); } }));
+  const errored_copy = errored.clone();
+
+  const results = await texts;
+  const result2 = await text2;
+  const errored_results = [await outcome(errored.text()), await outcome(errored_copy.text())];
+
+  state.resolve();
+  await state.done(() => {
+    testing.expectEqual(['ab', 'ab', 'ab'], results);
+    testing.expectTrue(body_replaced);
+    testing.expectTrue(stream.locked);
+    testing.expectEqual('k', result2);
+    testing.expectEqual(['rejected', 'rejected'], errored_results);
+  });
+</script>
+
 <script id=stream_body_pending_at_teardown type=module>
   // a read that never finishes is released with the page
   const pending = new Response(new ReadableStream()).text();

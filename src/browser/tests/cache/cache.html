@@ -136,6 +136,22 @@
   });
 </script>
 
+<script id=put_cloned_stream_body type=module>
+  const state = await testing.async();
+
+  // clone() drains a closed stream body, so the clone can be stored
+  await caches.delete('put-stream');
+  const cache = await caches.open('put-stream');
+  const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('streamed')); c.close(); } });
+  await cache.put('/s', new Response(stream).clone());
+  const text = await (await cache.match('/s')).text();
+
+  state.resolve();
+  await state.done(() => {
+    testing.expectEqual('streamed', text);
+  });
+</script>
+
 <script id=delete type=module>
   const state = await testing.async();
 
