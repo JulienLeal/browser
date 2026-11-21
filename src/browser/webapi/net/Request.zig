@@ -48,7 +48,7 @@ _method: http.Method,
 _method_name: ?[]const u8 = null,
 _headers: ?*Headers,
 _body: ?[]const u8,
-_body_stream: ?*ReadableStream = null, // drained into `_body` by clone() and fetch()
+_body_stream: ?*ReadableStream = null, // drained into `_body` by fetch(), and by clone() once closed
 _body_view: ?*ReadableStream = null, // lazily-created, exposed via the `body` getter
 _arena: *lp.Arena,
 _cache: Cache,
@@ -493,10 +493,24 @@ fn consumeAs(self: *Request, kind: body_consume.Package, exec: *const Execution)
 }
 
 pub fn clone(self: *Request, exec: *const Execution) !*Request {
-    // No stream tee: a stream body is drained so each copy owns its bytes.
-    // Lenient, since a tee wouldn't read the chunks.
-    const body = self.bodyBytes(.lenient) catch |err| switch (err) {
-        error.TypeError => return exec.js.local.?.typeError("Failed to read ReadableStream body"),
+    const local = exec.js.local.?;
+    try self.checkUnusable(local);
+
+    // A stream still open is teed, as in the spec. A closed one is drained so
+    // each copy owns its bytes, as fetch() and XMLHttpRequest only send a body
+    // they can read right away. Lenient, since a tee wouldn't read the chunks.
+    var branch: ?*ReadableStream = null;
+    if (self._body_stream) |stream| {
+        if (stream._state != .closed) {
+            const branches = try stream.tee(exec);
+            self._body_stream = branches[0];
+            // `body` is the new branch from now on
+            self._body_view = null;
+            branch = branches[1];
+        }
+    }
+    const body = if (branch != null) null else self.bodyBytes(.lenient) catch |err| switch (err) {
+        error.TypeError => return local.typeError("Failed to read ReadableStream body"),
         else => return err,
     };
     const arena = try exec.getPinnedArena(if (body) |b| b.len else 512, "Request.clone");
@@ -514,6 +528,7 @@ pub fn clone(self: *Request, exec: *const Execution) !*Request {
         ._redirect = self._redirect,
         ._mode = self._mode,
         ._body = if (body) |b| try arena.dupe(u8, b) else null,
+        ._body_stream = branch,
         ._signal = self._signal,
         ._referrer = switch (self._referrer) {
             .url => |u| .{ .url = try arena.dupeSentinel(u8, u, 0) },

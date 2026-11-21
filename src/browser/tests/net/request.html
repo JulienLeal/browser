@@ -366,7 +366,7 @@
   }));
   const text3 = await req3.text();
 
-  // clone() drains, so both copies read the body.
+  // clone() drains a closed stream, so both copies read the body.
   const req4 = new Request('https://example.com', {
     method: 'POST',
     duplex: 'half',
@@ -724,7 +724,7 @@
 </script>
 
 <script id=request_clone_non_uint8array_chunk>
-  // clone() tees the stream without reading it, so a bad chunk doesn't throw here.
+  // clone() drains a closed stream leniently, so a bad chunk doesn't throw here.
   const s = new ReadableStream({ start(c) { c.enqueue('x'); c.close(); } });
   const r = new Request('https://example.com', { method: 'POST', body: s, duplex: 'half' });
   testing.expectEqual('POST', r.clone().method);
@@ -846,5 +846,48 @@
     testing.expectEqual('TypeError', fetch_error);
     testing.expectEqual('TypeError', failed_error);
     testing.expectEqual('TypeError', failed_clone_error);
+  });
+</script>
+
+<script id=stream_body_clone type=module>
+  const state = await testing.async();
+  const enc = new TextEncoder();
+  const make = (body) => new Request('https://example.com', { method: 'POST', duplex: 'half', body });
+
+  // an open stream is teed: both copies read the chunks as they arrive
+  let controller;
+  const stream = new ReadableStream({ start(c) { controller = c; c.enqueue(enc.encode('a')); } });
+  const req = make(stream);
+  const body_before = req.body;
+  const copy = req.clone();
+  const body_replaced = req.body !== body_before;
+  const texts = Promise.all([req.text(), copy.text()]);
+  await new Promise((r) => setTimeout(r, 0));
+  controller.enqueue(enc.encode('b'));
+  controller.close();
+  const results = await texts;
+
+  // like Response.clone(), a body that was read or is locked can't be cloned
+  const clone_error = (r) => { try { r.clone(); return null; } catch (e) { return e.constructor.name; } };
+  const read = new Request('https://example.com', { method: 'POST', body: 'x' });
+  await read.text();
+  const read_error = clone_error(read);
+  const locked = new Request('https://example.com', { method: 'POST', body: 'x' });
+  locked.body.getReader();
+  const locked_error = clone_error(locked);
+  const disturbed = make(new ReadableStream({ start(c) { c.enqueue(enc.encode('1')); c.enqueue(enc.encode('2')); } }));
+  const page_reader = disturbed.body.getReader();
+  await page_reader.read();
+  page_reader.releaseLock();
+  const disturbed_error = clone_error(disturbed);
+
+  state.resolve();
+  await state.done(() => {
+    testing.expectEqual(['ab', 'ab'], results);
+    testing.expectTrue(body_replaced);
+    testing.expectTrue(stream.locked);
+    testing.expectEqual('TypeError', read_error);
+    testing.expectEqual('TypeError', locked_error);
+    testing.expectEqual('TypeError', disturbed_error);
   });
 </script>
